@@ -52,12 +52,40 @@ public class DeploymentController {
         }
     }
 
+    /** Thrown when the same link is already saved. */
+    static class DuplicateLinkException extends RuntimeException {
+        DuplicateLinkException(String message) {
+            super(message);
+        }
+    }
+
     private final DeploymentRepository repo;
     private final CryptoService crypto;
 
     public DeploymentController(DeploymentRepository repo, CryptoService crypto) {
         this.repo = repo;
         this.crypto = crypto;
+    }
+
+    /** Makes links comparable: ignores case, http/https, "www." and trailing slashes. */
+    private static String normalize(String link) {
+        return link.trim().toLowerCase()
+                .replaceFirst("^https?://", "")
+                .replaceFirst("^www\\.", "")
+                .replaceAll("/+$", "");
+    }
+
+    /** Throws if another record (not selfId) already uses this link. */
+    private void ensureLinkIsNew(String link, Long selfId) {
+        String wanted = normalize(link);
+        repo.findAll().stream()
+                .filter(d -> !d.getId().equals(selfId))
+                .filter(d -> normalize(d.getLink()).equals(wanted))
+                .findFirst()
+                .ifPresent(d -> {
+                    throw new DuplicateLinkException("This link is already saved under "
+                            + d.getAppName() + " (" + d.getPersonName() + ")");
+                });
     }
 
     @GetMapping("/health")
@@ -74,6 +102,7 @@ public class DeploymentController {
     @PostMapping("/api/deployments")
     @ResponseStatus(HttpStatus.CREATED)
     public DeploymentResponse create(@Valid @RequestBody DeploymentRequest r) {
+        ensureLinkIsNew(r.link(), null);
         Deployment d = new Deployment();
         d.setPersonName(r.personName().trim());
         d.setAppName(r.appName().trim());
@@ -90,6 +119,7 @@ public class DeploymentController {
     public ResponseEntity<DeploymentResponse> update(@PathVariable Long id,
                                                      @Valid @RequestBody DeploymentUpdate r) {
         return repo.findById(id).map(d -> {
+            ensureLinkIsNew(r.link(), id);
             d.setPersonName(r.personName().trim());
             d.setAppName(r.appName().trim());
             d.setLink(r.link().trim());
@@ -123,6 +153,12 @@ public class DeploymentController {
         if (!repo.existsById(id)) return ResponseEntity.notFound().build();
         repo.deleteById(id);
         return ResponseEntity.noContent().build();
+    }
+
+    @ExceptionHandler(DuplicateLinkException.class)
+    @ResponseStatus(HttpStatus.CONFLICT)
+    public Map<String, String> duplicate(DuplicateLinkException e) {
+        return Map.of("error", e.getMessage());
     }
 
     @ExceptionHandler(MethodArgumentNotValidException.class)
